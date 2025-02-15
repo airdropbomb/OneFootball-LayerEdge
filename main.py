@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import random
 import sys
 from datetime import datetime, timezone, timedelta
 from itertools import cycle
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from eth_account import Account
+from pyuseragents import random as random_useragent
 from eth_account.messages import encode_defunct
 from loguru import logger
 from curl_cffi.requests import AsyncSession, Response
@@ -16,15 +18,34 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.text import Text
 from rich.theme import Theme
 import inquirer
+from web3 import AsyncWeb3, AsyncHTTPProvider
+
 from config import sleep, ref, max_concurrent_wallets
-from src.data import query_verify, query_campaign, query_login, query_login_activities_panel, COMMON_HEADERS, \
-    query_user_me
+
+# Ваши GraphQL-запросы и пр.
+from src.data import (
+    query_verify,
+    query_campaign,
+    query_login,
+    query_login_activities_panel,
+    COMMON_HEADERS,
+    query_user_me,
+)
 from src.logger import logging_setup
-from src.task import campaign_activities_panel_deil, verify_activity_deil, activity_quiz_detail, verify_activity_quiz
-from src.utils import _make_request
+from src.task import (
+    campaign_activities_panel_deil,
+    verify_activity_deil,
+    activity_quiz_detail,
+    verify_activity_quiz,
+)
+# Функцию twitter нужно адаптировать, чтобы она принимала параметр twitter_auth_token.
+from src.twitter import twitter
+from src.utils import _make_request, create_signature, user_login
+
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, message="Curlm alread closed! quitting from process_data")
+
 logger.add(sys.stdout, level="INFO")
 logging_setup()
 logging.getLogger('asyncio').setLevel(logging.CRITICAL)
@@ -37,7 +58,7 @@ if sys.platform.startswith('win'):
 def _load_lines(file_path: str) -> List[str]:
     """Загружает и очищает строки из файла."""
     try:
-        with open(file_path, "r") as file:
+        with open(file_path, "r", encoding="utf-8") as file:
             return [line.strip() for line in file if line.strip()]
     except FileNotFoundError:
         logger.error(f"Файл не найден: {file_path}")
@@ -47,25 +68,22 @@ def _load_lines(file_path: str) -> List[str]:
         return []
 
 
-PRIVATE_KEYS = _load_lines("private_keys.txt")
-PROXIES = _load_lines("proxies.txt")
+# Список приватных ключей
+PRIVATE_KEYS = _load_lines("txt/private_keys.txt")
+# Список прокси
+PROXIES = _load_lines("txt/proxies.txt")
+# Список Твиттер-токенов
+TWITTER_TOKENS = _load_lines("txt/twitter_tokens.txt")
+
+# Из приватных ключей создаём объекты Account
 ACCOUNTS = [Account.from_key(key) for key in PRIVATE_KEYS]
 PROXY_CYCLE = cycle(PROXIES) if PROXIES else None
 
 PRIVY_HEADERS = {
     **COMMON_HEADERS,
     'privy-app-id': 'clphlvsh3034xjw0fvs59mrdc',
-    'privy-client': 'react-auth:1.80.0-beta-20240821191745',
+    'privy-client': 'react-auth:2.4.1',
 }
-
-
-# --- Утилиты ---
-
-async def create_signature(text: str, private_key: str) -> str:
-    """Создает подпись для текста с использованием приватного ключа."""
-    encoded_message = encode_defunct(text=text)
-    signature = Account.sign_message(encoded_message, private_key=private_key)
-    return f'0x{signature.signature.hex()}'
 
 
 def _get_proxy_url(proxy: Optional[str]) -> Optional[str]:
@@ -73,45 +91,38 @@ def _get_proxy_url(proxy: Optional[str]) -> Optional[str]:
     return proxy if proxy else None
 
 
-async def _check_proxy(proxy: str) -> bool:
-    """Проверяет работоспособность прокси."""
-    async with AsyncSession() as session:
-        try:
-            response = await session.get("https://www.google.com", proxy=proxy,
-                                         timeout=5)  # Измените URL на более надежный
-            return response.status_code == 200
-        except Exception:
-            return False
-
-
-async def _get_working_proxy(proxy_cycle) -> Optional[str]:
-    """Получает рабочий прокси, перебирая список, и возвращает None если не находит."""
-    if not PROXIES:
-        return None
-
-    for proxy in proxy_cycle:
-        if await _check_proxy(proxy):
-            return proxy
+async def _get_working_proxy(proxies: List[str]) -> Optional[str]:
+    """Проверяет и возвращает рабочий прокси из списка."""
+    while True:
+        rand_proxy = random.choice(proxies)
+        # ниже URL может быть любым, где вы проверяете работоспособность
+        web3 = AsyncWeb3(
+            AsyncHTTPProvider(endpoint_uri='https://bsc-pokt.nodies.app', request_kwargs={"proxy": rand_proxy}))
+        if await web3.is_connected():
+            return rand_proxy
         else:
-            logger.warning(f"Прокси не работает: {proxy}")
-    logger.error("Нет рабочих прокси!")
-    return None
+            logger.warning(f'{rand_proxy} не работает, пробуем другой...')
 
 
 # --- API-запросы ---
-
 async def siwe_accept_terms(session: AsyncSession, proxy: Optional[str], token: str) -> Dict[str, Any]:
     """Принимает условия использования."""
     headers = {
         **PRIVY_HEADERS,
         'authorization': f'Bearer {token}',
     }
-    return await _make_request(session, 'https://auth.privy.io/api/v1/users/me/accept_terms', headers=headers,
-                               json_data={}, proxy=proxy, operation_name='siwe_accept_terms')
+    return await _make_request(
+        session,
+        'https://auth.privy.io/api/v1/users/me/accept_terms',
+        headers=headers,
+        json_data={},
+        proxy=proxy,
+        operation_name='siwe_accept_terms'
+    )
 
 
 async def verify_activity(
-        session: AsyncSession, proxy: Optional[str], token: str, privy_id_token: str
+        session: AsyncSession, proxy: Optional[str], token: str, privy_id_token: str, activityId = '14f59386-4b62-4178-9cd0-cc3a8feb1773'
 ) -> Dict[str, Any]:
     """Верифицирует активность."""
     headers = {
@@ -124,7 +135,7 @@ async def verify_activity(
         'operationName': 'VerifyActivity',
         'variables': {
             'data': {
-                'activityId': '14f59386-4b62-4178-9cd0-cc3a8feb1773',
+                'activityId': activityId,
                 'metadata': {
                     'referralCode': ref,
                 },
@@ -132,8 +143,14 @@ async def verify_activity(
         },
         'query': query_verify,
     }
-    return await _make_request(session, 'https://api.deform.cc/', headers=headers, json_data=json_data, proxy=proxy,
-                               operation_name='verify_activity')
+    return await _make_request(
+        session,
+        'https://api.deform.cc/',
+        headers=headers,
+        json_data=json_data,
+        proxy=proxy,
+        operation_name='verify_activity'
+    )
 
 
 async def campaign_activities(session: AsyncSession, proxy: Optional[str], token: str) -> Dict[str, Any]:
@@ -150,33 +167,14 @@ async def campaign_activities(session: AsyncSession, proxy: Optional[str], token
         },
         'query': query_campaign,
     }
-    return await _make_request(session, 'https://api.deform.cc/', headers=headers, json_data=json_data, proxy=proxy,
-                               operation_name='campaign_activities')
-
-
-async def user_login(session: AsyncSession, proxy: Optional[str], token: str) -> Optional[str]:
-    """Выполняет вход пользователя."""
-    headers = {
-        **COMMON_HEADERS,
-        'x-apollo-operation-name': 'UserLogin',
-    }
-    json_data = {
-        'operationName': 'UserLogin',
-        'variables': {
-            'data': {
-                'externalAuthToken': f'{token}',
-            },
-        },
-        'query': query_login,
-    }
-    response = await _make_request(session, 'https://api.deform.cc/', headers=headers, json_data=json_data, proxy=proxy,
-                                   operation_name='user_login')
-    if response and "data" in response and 'userLogin' in response["data"]:
-        token = response["data"]["userLogin"]
-        logger.debug(f"User Login Token: {token}")
-        return token
-    return None
-
+    return await _make_request(
+        session,
+        'https://api.deform.cc/',
+        headers=headers,
+        json_data=json_data,
+        proxy=proxy,
+        operation_name='campaign_activities'
+    )
 
 async def campaign_activities_panel(session: AsyncSession, proxy: Optional[str]) -> Optional[str]:
     """Получает ID кампании."""
@@ -197,8 +195,13 @@ async def campaign_activities_panel(session: AsyncSession, proxy: Optional[str])
         'query': query_login_activities_panel,
     }
     try:
-        response: Response = await session.request('POST', 'https://api.deform.cc/', json=json_data, proxy=proxy,
-                                                   headers=headers)
+        response: Response = await session.request(
+            'POST',
+            'https://api.deform.cc/',
+            json=json_data,
+            proxy=proxy,
+            headers=headers
+        )
         if response.status_code >= 400:
             logger.error(f"Error getting campaign ID - HTTP Error: {response.status_code}")
             if response.text:
@@ -213,6 +216,7 @@ async def campaign_activities_panel(session: AsyncSession, proxy: Optional[str])
 
 
 async def user_me(session: AsyncSession, proxy: Optional[str], token: str, address: str) -> Optional[int]:
+    """Получает количество очков пользователя."""
     headers = {
         **COMMON_HEADERS,
         'authorization': f'Bearer {token}',
@@ -225,10 +229,21 @@ async def user_me(session: AsyncSession, proxy: Optional[str], token: str, addre
         },
         'query': query_user_me,
     }
-    response = await _make_request(session, 'https://api.deform.cc/', headers=headers, json_data=json_data, proxy=proxy,
-                                   operation_name='user_me')
+    response = await _make_request(
+        session,
+        'https://api.deform.cc/',
+        headers=headers,
+        json_data=json_data,
+        proxy=proxy,
+        operation_name='user_me'
+    )
 
-    if response and "data" in response and response["data"]["userMe"] and response["data"]["userMe"]['campaignSpot']:
+    if (
+            response
+            and "data" in response
+            and response["data"]["userMe"]
+            and response["data"]["userMe"]['campaignSpot']
+    ):
         points = response["data"]["userMe"]['campaignSpot']['points']
         logger.info(f"User points: {points} in {address}")
         return points
@@ -236,140 +251,203 @@ async def user_me(session: AsyncSession, proxy: Optional[str], token: str, addre
         logger.warning(f"Could not retrieve points for address {address}")
         return None
 
-
-async def siwe_auth(session: AsyncSession, account: Account, private_key: str, proxy: Optional[str],
-                    full_guide: bool = True, wallet_number: int = 0, chek: bool = False) -> tuple[bool, Optional[int]]:
+async def siwe_auth(
+        account: Account,
+        private_key: str,
+        twitter_auth_token: Optional[str],  # Добавили параметр для Twitter-токена
+        full_guide: bool = True,
+        wallet_number: int = 0,
+        chek: bool = False
+) -> Tuple[bool, Optional[int]]:
     """Выполняет авторизацию SIWE и связанные действия."""
-    logger.info(f"Обработка кошелька #{wallet_number}: {account.address} с {proxy or 'без прокси'}")
-    campaign_id = await campaign_activities_panel(session, proxy)
-    if not campaign_id:
-        return False, None
+    async with AsyncSession() as session:
+        # 📌 1️⃣ Устанавливаем прокси
+        proxy = None
+        if PROXIES:
+            proxy = await _get_working_proxy(PROXIES)
 
-    headers_init = {
-        **PRIVY_HEADERS,
-        'privy-ca-id': campaign_id,
-    }
-    json_data_init = {'address': account.address}
+        logger.info(f"Обработка кошелька #{wallet_number}: {account.address} с {proxy or 'без прокси'}")
 
-    await asyncio.sleep(sleep)
-    response_init = await _make_request(
-        session,
-        'https://auth.privy.io/api/v1/siwe/init',
-        headers=headers_init,
-        json_data=json_data_init,
-        proxy=proxy,
-        operation_name='siwe_init',
-    )
+        # 📌 2️⃣ Получаем campaign_id (если не получилось - выход)
+        campaign_id = await campaign_activities_panel(session, proxy)
+        if not campaign_id:
+            return False, None
 
-    if 'nonce' not in response_init:
-        logger.error(f"Ошибка в первом запросе")
-        return False, None
-    await asyncio.sleep(sleep)
-    nonce = response_init['nonce']
-    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        # 📌 3️⃣ Генерируем nonce для авторизации
+        headers_init = {
+            **PRIVY_HEADERS,
+            'User-Agent': random_useragent(),
+            'privy-ca-id': campaign_id,
+        }
+        json_data_init = {'address': account.address}
 
-    message = (
-        f"ofc.onefootball.com wants you to sign in with your Ethereum account:\n"
-        f"{account.address}\n\nBy signing, you are proving you own this wallet and logging in. This does not initiate a transaction or cost any fees.\n\n"
-        f"URI: https://ofc.onefootball.com\nVersion: 1\nChain ID: 1\nNonce: {nonce}\n"
-        f"Issued At: {expires_at}\nResources:\n- https://privy.io"
-    )
-
-    signature = await create_signature(message, private_key)
-
-    json_data_auth = {
-        'message': message,
-        'signature': signature,
-        'chainId': 'eip155:1',
-        'walletClientType': 'rabby_wallet',
-        'connectorType': 'injected',
-    }
-    await asyncio.sleep(sleep)
-    response_auth = await _make_request(
-        session,
-        'https://auth.privy.io/api/v1/siwe/authenticate',
-        headers=headers_init,
-        json_data=json_data_auth,
-        proxy=proxy,
-        operation_name='siwe_authenticate',
-    )
-
-    if not response_auth or 'token' not in response_auth or 'identity_token' not in response_auth:
-        logger.error(f"Ошибка в авторизации: {response_auth}")
-        return False, None
-    logger.info(f'Аккаунт {account.address} зарегистрирован!')
-
-    token = response_auth['token']
-    privy_id_token = response_auth['identity_token']
-
-    await asyncio.sleep(sleep)
-    await siwe_accept_terms(session, proxy, token)
-    await asyncio.sleep(sleep)
-    user_token = await user_login(session, proxy, token)
-    if not user_token: return False, None
-    await asyncio.sleep(sleep)
-    await campaign_activities(session, proxy, user_token)
-    await asyncio.sleep(sleep)
-    await verify_activity(session, proxy, user_token, privy_id_token)
-    logger.info(f'Аккаунт {account.address} прошел через реф - {ref}')
-    await asyncio.sleep(sleep)
-
-    if full_guide:
-        await campaign_activities_panel_deil(session, proxy, user_token)
         await asyncio.sleep(sleep)
-        status = await verify_activity_deil(session, proxy, user_token, privy_id_token)
-        if status == 'COMPLETED':
-            logger.success(f'Дейлик выполнен успешно!.')
-        elif status == 'ALREADY_COMPLETED':
-            logger.warning(f'Дейлик уже выполнен, пропускаю...')
+        response_init = await _make_request(
+            session, 'https://auth.privy.io/api/v1/siwe/init',
+            headers=headers_init, json_data=json_data_init, proxy=proxy, operation_name='siwe_init'
+        )
+
+        if 'nonce' not in response_init:
+            logger.error(f"Ошибка в первом запросе: {response_init}")
+            return False, None
+
+        await asyncio.sleep(sleep)
+        nonce = response_init['nonce']
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+        message = (
+            f"ofc.onefootball.com wants you to sign in with your Ethereum account:\n"
+            f"{account.address}\n\nBy signing, you are proving you own this wallet and logging in. "
+            f"This does not initiate a transaction or cost any fees.\n\n"
+            f"URI: https://ofc.onefootball.com\nVersion: 1\nChain ID: 1\nNonce: {nonce}\n"
+            f"Issued At: {expires_at}\nResources:\n- https://privy.io"
+        )
+
+        # 📌 4️⃣ Подписываем сообщение
+        signature = await create_signature(message, private_key)
+
+        json_data_auth = {
+            'message': message,
+            'signature': signature,
+            'chainId': 'eip155:1',
+            'walletClientType': 'okx_wallet',
+            'connectorType': 'injected',
+        }
+
+        await asyncio.sleep(sleep)
+        response_auth = await _make_request(
+            session, 'https://auth.privy.io/api/v1/siwe/authenticate',
+            headers=headers_init, json_data=json_data_auth, proxy=proxy, operation_name='siwe_authenticate'
+        )
+
+        if not response_auth or 'token' not in response_auth or 'identity_token' not in response_auth:
+            logger.error(f"Ошибка в авторизации: {response_auth}")
+            return False, None
+
+        logger.info(f'Аккаунт {account.address} успешно авторизован!')
+        token = response_auth['token']
+        token_ref = response_auth['refresh_token']
+        privy_id_token = response_auth['identity_token']
+
+        # 📌 5️⃣ Принимаем условия и логинимся
+        await asyncio.sleep(sleep)
+        await siwe_accept_terms(session, proxy, token)
+
+        await asyncio.sleep(sleep)
+        user_token = await user_login(session, proxy, token)
+        if not user_token:
+            return False, None
+
+        # 📌 6️⃣ Запускаем активности (кампании, рефералы)
+        await asyncio.sleep(sleep)
+        await campaign_activities(session, proxy, user_token)
+
+        await asyncio.sleep(sleep)
+        await verify_activity(session, proxy, user_token, privy_id_token)
+        logger.info(f'Аккаунт {account.address} прошёл через реф - {ref}')
+
+        # 📌 7️⃣ Работа с Twitter (если есть токен)
+        if twitter_auth_token:
+            logger.info(f"Пытаемся подключить твитер {account.address}")
+
+            await twitter(session, proxy, token, twitter_auth_token, account.address, private_key)
+
+            tasks = [
+                ('Твитер', '630499bc-8adb-411b-a503-d0da7de08e66'),
+                ('Подписка', '4590c2de-d1ac-43b4-a403-216255ec1e6e'),
+                ('Лайк', '19ba588e-a6f7-4120-a8be-a29415e2ad4a')
+            ]
+
+            for task_name, task_id in tasks:
+                await asyncio.sleep(sleep)
+                await campaign_activities(session, proxy, user_token)
+                status = await verify_activity_deil(session, proxy, user_token, privy_id_token, task_id)
+                if status == 'COMPLETED':
+                    logger.success(f'{task_name} выполнен успешно!')
+                else:
+                    logger.error(f'Ошибка при выполнении {task_name}')
         else:
-            logger.error(f'Ошибка при выполнении дейлика')
-        await asyncio.sleep(sleep)
+            logger.warning(f"Нет Twitter-токена для {account.address}, пропускаем Twitter-задачу.")
 
-        await activity_quiz_detail(session, proxy, user_token)
-        await asyncio.sleep(sleep)
-        quiz_status = await verify_activity_quiz(session, proxy, user_token, privy_id_token)
-        if quiz_status == 'COMPLETED':
-            logger.success(f'Квиз выполнен! {account.address}')
-        elif status == 'ALREADY_COMPLETED':
-            logger.warning(f'Квиз уже выполнен, пропускаю...')
-        else:
-            logger.error(f'Квиз не выполнен {account.address}')
-        await asyncio.sleep(sleep)
+        # 📌 8️⃣ Выполняем дополнительные активности (дейлики, квизы)
+        if full_guide:
+            await campaign_activities_panel_deil(session, proxy, user_token)
+            await asyncio.sleep(sleep)
+            status = await verify_activity_deil(session, proxy, user_token, privy_id_token)
+            logger.success(f'Дейлик выполнен успешно!') if status == 'COMPLETED' else logger.warning(
+                f'Дейлик уже выполнен.')
 
-    if full_guide == False and chek == False:
-        await campaign_activities_panel_deil(session, proxy, user_token)
-        await asyncio.sleep(sleep)
-        status = await verify_activity_deil(session, proxy, user_token, privy_id_token)
-        if status == 'COMPLETED':
-            logger.success(f'Дейлик выполнен успешно!.')
-        elif status == 'ALREADY_COMPLETED':
-            logger.warning(f'Дейлик уже выполнен, пропускаю.')
-        else:
-            logger.error(f'Ошибка при выполнении дейлика.')
-        await asyncio.sleep(sleep)
-    points = await user_me(session, proxy, user_token, account.address)
+            await activity_quiz_detail(session, proxy, user_token)
+            await asyncio.sleep(sleep)
+            quiz_status = await verify_activity_quiz(session, proxy, user_token, privy_id_token)
+            logger.success(f'Квиз 1 выполнен!') if quiz_status == 'COMPLETED' else logger.warning(
+                f'Квиз 1 уже выполнен.')
 
-    return True, points
+            await activity_quiz_detail(session, proxy, user_token, True)
+            await asyncio.sleep(sleep)
+            quiz_status = await verify_activity_quiz(session, proxy, user_token, privy_id_token, True)
+            logger.success(f'Квиз 2 выполнен!') if quiz_status == 'COMPLETED' else logger.warning(
+                f'Квиз 2 уже выполнен.')
+
+        # 📌 9️⃣ Завершаем проверку дейликов
+        if not full_guide and not chek:
+            await campaign_activities_panel_deil(session, proxy, user_token)
+            await asyncio.sleep(sleep)
+            status = await verify_activity_deil(session, proxy, user_token, privy_id_token)
+            logger.success(f'Дейлик выполнен успешно!') if status == 'COMPLETED' else logger.warning(
+                f'Дейлик уже выполнен.')
+
+        # 📌 🔟 Получаем очки и завершаем
+        points = await user_me(session, proxy, user_token, account.address)
+        return True, points
 
 
-async def process_account(account: Account, private_key: str, proxy: Optional[str], full_guide: bool,
-                          wallet_number: int, chek: bool, session) -> tuple[str, str, Optional[int]]:
+async def process_account(
+        account: Account,
+        private_key: str,
+        twitter_auth_token: Optional[str],
+        full_guide: bool,
+        wallet_number: int,
+        chek: bool,
+) -> Tuple[str, str, Optional[int]]:
     """Обрабатывает один аккаунт и возвращает данные для отчета."""
-    success, points = await siwe_auth(session, account, private_key, proxy, full_guide, wallet_number, chek)
+    success, points = await siwe_auth(
+        account,
+        private_key,
+        twitter_auth_token=twitter_auth_token,
+        full_guide=full_guide,
+        wallet_number=wallet_number,
+        chek=chek
+    )
     if success:
         logger.success(f"Account {account.address}: Success")
     else:
         logger.error(f"Account {account.address}: Error")
     return private_key, account.address, points
 
+
 # --- Новая функция для обработки с семафором ---
 semaphore = asyncio.Semaphore(max_concurrent_wallets)
 
 
-async def process_account_with_semaphore(session, account, private_key, proxy, i, full_guide, chek):
+async def process_account_with_semaphore(
+        account: Account,
+        private_key: str,
+        i: int,
+        full_guide: bool,
+        chek: bool
+) -> Tuple[str, str, Optional[int]]:
     async with semaphore:
-        return await process_account(account, private_key, proxy, full_guide, i + 1, chek, session)
+        # Берём Twitter-токен, если он есть под таким индексом
+        twitter_auth_token = TWITTER_TOKENS[i] if i < len(TWITTER_TOKENS) else None
+        return await process_account(
+            account,
+            private_key,
+            twitter_auth_token,
+            full_guide,
+            i + 1,
+            chek,
+        )
 
 
 async def run_full_guide():
@@ -381,13 +459,17 @@ async def run_full_guide():
     if not PROXIES:
         logger.warning("Нет прокси, будет выполнятся без прокси.")
 
-    proxy_cycle = cycle(PROXIES) if PROXIES else None
-
-    async with AsyncSession() as session:
-        tasks = [process_account_with_semaphore(session, account, private_key, await _get_working_proxy(proxy_cycle), i,
-                                                True, False)
-                 for i, (account, private_key) in enumerate(zip(ACCOUNTS, PRIVATE_KEYS))]
-        all_results = await asyncio.gather(*tasks)
+    tasks = [
+        process_account_with_semaphore(
+            account,
+            private_key,
+            i,
+            full_guide=True,
+            chek=False
+        )
+        for i, (account, private_key) in enumerate(zip(ACCOUNTS, PRIVATE_KEYS))
+    ]
+    await asyncio.gather(*tasks)
 
 
 async def run_daily_only():
@@ -398,27 +480,42 @@ async def run_daily_only():
 
     if not PROXIES:
         logger.warning("Нет прокси, будет выполнятся без прокси.")
-    proxy_cycle = cycle(PROXIES) if PROXIES else None
+
     async with AsyncSession() as session:
-        tasks = [process_account_with_semaphore(session, account, private_key, await _get_working_proxy(proxy_cycle), i,
-                                                False, False)
-                 for i, (account, private_key) in enumerate(zip(ACCOUNTS, PRIVATE_KEYS))]
-        all_results = await asyncio.gather(*tasks)
+        tasks = [
+            process_account_with_semaphore(
+                account,
+                private_key,
+                i,
+                full_guide=False,
+                chek=False
+            )
+            for i, (account, private_key) in enumerate(zip(ACCOUNTS, PRIVATE_KEYS))
+        ]
+        await asyncio.gather(*tasks)
 
 
 async def run_chek():
-    """Запускает чекер с ограничением параллелизма."""
+    """Запускает чекер (получение поинтов) с ограничением параллелизма,
+       без выполнения твиттера и прочих активностей."""
     if not ACCOUNTS or not PRIVATE_KEYS:
         logger.error("Нет приватных ключей для обработки.")
         return
 
     if not PROXIES:
         logger.warning("Нет прокси, будет выполнятся без прокси.")
-    proxy_cycle = cycle(PROXIES) if PROXIES else None
+
     async with AsyncSession() as session:
-        tasks = [process_account_with_semaphore(session, account, private_key, await _get_working_proxy(proxy_cycle), i,
-                                                False, True)
-                 for i, (account, private_key) in enumerate(zip(ACCOUNTS, PRIVATE_KEYS))]
+        tasks = [
+            process_account_with_semaphore(
+                account,
+                private_key,
+                i,
+                full_guide=False,
+                chek=True
+            )
+            for i, (account, private_key) in enumerate(zip(ACCOUNTS, PRIVATE_KEYS))
+        ]
         results = await asyncio.gather(*tasks)
 
     wb = Workbook()
@@ -428,16 +525,17 @@ async def run_chek():
         ws.append(row)
 
     wb.save("account_results.xlsx")
-    logger.success("Results saved to account_results.xlsx")
+    logger.success("Результаты сохранены в account_results.xlsx")
 
 
-def main_menu(console):
+def main_menu(console: Console) -> str:
     questions = [
-        inquirer.List('action',
-                      message="What do you want to do?",
-                      choices=['Run the Full Guide', 'Run Daily Tasks', 'Run Checker', 'Exit'],
-                      carousel=True
-                      ),
+        inquirer.List(
+            'action',
+            message="What do you want to do?",
+            choices=['Run the Full Guide', 'Run Daily Tasks', 'Run Checker', 'Exit'],
+            carousel=True
+        ),
     ]
     answers = inquirer.prompt(questions)
     return answers['action']
@@ -496,11 +594,12 @@ async def main():
                 console=console
         ) as progress:
             task = progress.add_task("Running full guide...", total=100)
-            for i in range(100):
-                await asyncio.sleep(0.05)  # Симуляция процесса
+            for _ in range(100):
+                await asyncio.sleep(0.05)
                 progress.update(task, advance=1)
         await run_full_guide()
         console.print("[success]Full guide completed![/success]")
+
     elif selected_action == "Run Daily Tasks":
         console.print(Panel(
             Text("Starting Daily Tasks...", justify="center", style="info"),
@@ -509,6 +608,7 @@ async def main():
         ))
         await run_daily_only()
         console.print("[success]Daily tasks completed![/success]")
+
     elif selected_action == "Run Checker":
         console.print(Panel(
             Text("Starting Checker...", justify="center", style="info"),
@@ -517,6 +617,7 @@ async def main():
         ))
         await run_chek()
         console.print("[success]Checker completed![/success]")
+
     elif selected_action == "Exit":
         console.print(Panel(
             Text("Exiting the program. Goodbye!", justify="center", style="warning"),
