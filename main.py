@@ -20,7 +20,7 @@ from rich.theme import Theme
 import inquirer
 from web3 import AsyncWeb3, AsyncHTTPProvider
 
-from config import sleep, ref, max_concurrent_wallets
+from config import sleep, ref, max_concurrent_wallets, num_wallets, sleep_wallets
 
 # Ваши GraphQL-запросы и пр.
 from src.data import (
@@ -67,7 +67,6 @@ def _load_lines(file_path: str) -> List[str]:
         logger.error(f"Ошибка загрузки файла {file_path}: {e}")
         return []
 
-
 # Список приватных ключей
 PRIVATE_KEYS = _load_lines("txt/private_keys.txt")
 # Список прокси
@@ -80,11 +79,24 @@ ACCOUNTS = [Account.from_key(key) for key in PRIVATE_KEYS]
 PROXY_CYCLE = cycle(PROXIES) if PROXIES else None
 
 PRIVY_HEADERS = {
-    **COMMON_HEADERS,
+    'accept': 'application/json',
+    'accept-language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'cache-control': 'no-cache',
+    'content-type': 'application/json',
+    'dnt': '1',
+    'origin': 'https://club.onefootball.com',
+    'pragma': 'no-cache',
+    'priority': 'u=1, i',
     'privy-app-id': 'clphlvsh3034xjw0fvs59mrdc',
     'privy-client': 'react-auth:2.4.1',
+    'referer': 'https://club.onefootball.com/',
+    'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'cross-site',
 }
-
 
 def _get_proxy_url(proxy: Optional[str]) -> Optional[str]:
     """Формирует URL прокси, если прокси предоставлен."""
@@ -110,6 +122,7 @@ async def siwe_accept_terms(session: AsyncSession, proxy: Optional[str], token: 
     headers = {
         **PRIVY_HEADERS,
         'authorization': f'Bearer {token}',
+        'user-agent': random_useragent(),
     }
     return await _make_request(
         session,
@@ -259,6 +272,9 @@ async def siwe_auth(
         wallet_number: int = 0,
         chek: bool = False
 ) -> Tuple[bool, Optional[int]]:
+    if wallet_number//num_wallets!=0:
+        logger.info(f'Sleeping for {sleep_wallets} seconds')
+        await asyncio.sleep(sleep_wallets)
     """Выполняет авторизацию SIWE и связанные действия."""
     async with AsyncSession() as session:
         # 📌 1️⃣ Устанавливаем прокси
@@ -350,22 +366,24 @@ async def siwe_auth(
         if twitter_auth_token:
             logger.info(f"Пытаемся подключить твитер {account.address}")
 
-            await twitter(session, proxy, token, twitter_auth_token, account.address, private_key)
+            twitter_status = await twitter(session, proxy, token, twitter_auth_token, account.address, private_key)
+            if twitter_status != 0:
+                tasks = [
+                    ('Твитер', '630499bc-8adb-411b-a503-d0da7de08e66'),
+                    ('Подписка', '4590c2de-d1ac-43b4-a403-216255ec1e6e'),
+                    ('Лайк', '19ba588e-a6f7-4120-a8be-a29415e2ad4a')
+                ]
 
-            tasks = [
-                ('Твитер', '630499bc-8adb-411b-a503-d0da7de08e66'),
-                ('Подписка', '4590c2de-d1ac-43b4-a403-216255ec1e6e'),
-                ('Лайк', '19ba588e-a6f7-4120-a8be-a29415e2ad4a')
-            ]
-
-            for task_name, task_id in tasks:
-                await asyncio.sleep(sleep)
-                await campaign_activities(session, proxy, user_token)
-                status = await verify_activity_deil(session, proxy, user_token, privy_id_token, task_id)
-                if status == 'COMPLETED':
-                    logger.success(f'{task_name} выполнен успешно!')
-                else:
-                    logger.error(f'Ошибка при выполнении {task_name}')
+                for task_name, task_id in tasks:
+                    await asyncio.sleep(sleep)
+                    await campaign_activities(session, proxy, user_token)
+                    status = await verify_activity_deil(session, proxy, user_token, privy_id_token, task_id)
+                    if status == 'COMPLETED':
+                        logger.success(f'{task_name} выполнен успешно!')
+                    elif status == 'ALREADY_COMPLETED':
+                        logger.warning(f'{task_name} уже выполнен.')
+                    else:
+                        logger.error(f'Ошибка при выполнении {task_name}')
         else:
             logger.warning(f"Нет Twitter-токена для {account.address}, пропускаем Twitter-задачу.")
 
@@ -383,12 +401,23 @@ async def siwe_auth(
             logger.success(f'Квиз 1 выполнен!') if quiz_status == 'COMPLETED' else logger.warning(
                 f'Квиз 1 уже выполнен.')
 
-            await activity_quiz_detail(session, proxy, user_token, True)
+            await activity_quiz_detail(session, proxy, user_token, 2)
             await asyncio.sleep(sleep)
-            quiz_status = await verify_activity_quiz(session, proxy, user_token, privy_id_token, True)
+            quiz_status = await verify_activity_quiz(session, proxy, user_token, privy_id_token, 2)
             logger.success(f'Квиз 2 выполнен!') if quiz_status == 'COMPLETED' else logger.warning(
                 f'Квиз 2 уже выполнен.')
 
+            await activity_quiz_detail(session, proxy, user_token, 3)
+            await asyncio.sleep(sleep)
+            quiz_status = await verify_activity_quiz(session, proxy, user_token, privy_id_token, 3)
+            logger.success(f'Квиз 3 выполнен!') if quiz_status == 'COMPLETED' else logger.warning(
+                f'Квиз 3 уже выполнен.')
+
+            await activity_quiz_detail(session, proxy, user_token, 4)
+            await asyncio.sleep(sleep)
+            quiz_status = await verify_activity_quiz(session, proxy, user_token, privy_id_token, 4)
+            logger.success(f'Квиз 4 выполнен!') if quiz_status == 'COMPLETED' else logger.warning(
+                f'Квиз 4 уже выполнен.')
         # 📌 9️⃣ Завершаем проверку дейликов
         if not full_guide and not chek:
             await campaign_activities_panel_deil(session, proxy, user_token)

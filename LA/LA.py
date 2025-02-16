@@ -5,7 +5,7 @@ from eth_account import Account
 from web3.auto import w3
 from src.utils import create_signature
 
-MAX_CONCURRENT_TASKS = 3
+MAX_CONCURRENT_TASKS = 20
 sleep = 1
 ref = 's6vtkNva'
 
@@ -57,7 +57,7 @@ async def process_wallet(session, pk, proxy, semaphore, i):
         response = await make_request(session,
                                       f'https://referralapi.layeredge.io/api/light-node/node-action/{address}/start',
                                       "POST", headers, json_data, proxy)
-        print(f"[{address}] Активация узла: {response}")
+        # print(f"[{address}] Активация узла: {response}")
 
         await asyncio.sleep(sleep)
 
@@ -65,7 +65,7 @@ async def process_wallet(session, pk, proxy, semaphore, i):
         response = await make_request(session,
                                       f'https://referralapi.layeredge.io/api/light-node/node-status/{address}',
                                       "GET", headers, proxy=proxy)
-        print(f"[{address}] Статус узла: {response}")
+        # print(f"[{address}] Статус узла: {response}")
 
         await asyncio.sleep(sleep)
 
@@ -78,7 +78,7 @@ async def process_wallet(session, pk, proxy, semaphore, i):
         response = await make_request(session,
                                       'https://referralapi.layeredge.io/api/light-node/claim-node-points',
                                       "POST", headers, json_data, proxy)
-        # print(f"[{address}] Запрос на очки: {response}")
+        print(f"[{address}] Запрос на очки: {response}")
 
         await asyncio.sleep(sleep)
 

@@ -2,7 +2,7 @@
 from typing import Optional
 
 from src.data import query_deil, query_verify_deil, query_quiz, query_quiz_verify, COMMON_HEADERS, json_data_qz_1, \
-    json_data_qz_2, json_data_qz1, json_data_qz2
+    json_data_qz_2, json_data_qz1, json_data_qz2, json_data_3, json_data_qz4, json_data_4, json_data_qz3
 from src.utils import _make_request
 from curl_cffi.requests import AsyncSession
 from loguru import logger
@@ -84,14 +84,17 @@ async def verify_activity_deil(session: AsyncSession, proxy: Optional[str], toke
 
 
 
-async def activity_quiz_detail(session: AsyncSession, proxy: Optional[str], token: str, num2 = False) -> None:
+async def activity_quiz_detail(session: AsyncSession, proxy: Optional[str], token: str, num = None) -> None:
     """Получает детали квиза."""
     headers = {
         **COMMON_HEADERS,
         'authorization': f'Bearer {token}',
         'x-apollo-operation-name': 'ActivityQuizDetail',
     }
-    if num2: json_data = json_data_qz2
+    if num == 2: json_data = json_data_qz2
+    if num == 3: json_data = json_data_qz3
+    if num == 4: json_data = json_data_qz4
+
 
     else: json_data = json_data_qz1
 
@@ -105,10 +108,12 @@ async def activity_quiz_detail(session: AsyncSession, proxy: Optional[str], toke
     )
 
 
-async def verify_activity_quiz(session: AsyncSession, proxy: Optional[str], token: str, token_id: str, num2 = False) -> str:
+async def verify_activity_quiz(session: AsyncSession, proxy: Optional[str], token: str, token_id: str, num = None) -> str:
     """Верифицирует активность (квиз)."""
-    if num2:
+    if num == 2:
         json_data = json_data_qz_2
+    if num == 3: json_data = json_data_3
+    if num == 4: json_data = json_data_4
 
     else:
         json_data = json_data_qz_1

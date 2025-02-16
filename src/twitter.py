@@ -233,6 +233,7 @@ async def check_joined(session, authorization_code, state_code, code_verifier, p
     if response.get('error') == 'Another user has already linked this Twitter account' and response.get(
             'code') == 'linked_to_another_user':
         logger.error("Another user has already linked this Twitter account")
+        return None
     twitter_username = None
     for account2 in response.get('linked_accounts', []):
         if account2.get('type') == 'twitter_oauth':
@@ -249,9 +250,10 @@ async def twitter(session: AsyncSession, proxy: Optional[str], token: str, accou
     authorize_url, state, code_verifier, code_challenge = await get_authorize_data(session,account.useragent, proxy, token)
     oauth2_data = get_oauth2_data(authorize_url)
     auth_code, redirect_url =await account.authorize(oauth2_data, authorize_url)
-    if not auth_code: return
+    if not auth_code: return 0
     url, privy_oauth_state, privy_oauth_code = await post_auth(session, state, auth_code, account.useragent, proxy)
 
     await join(session, account.useragent, proxy, url)
 
-    await check_joined(session, privy_oauth_code, privy_oauth_state, code_verifier, proxy, account.useragent, token, account_auth_token, address, private_key)
+    status = await check_joined(session, privy_oauth_code, privy_oauth_state, code_verifier, proxy, account.useragent, token, account_auth_token, address, private_key)
+    if not status: return 0

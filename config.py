@@ -1,5 +1,8 @@
 sleep = 1
 
+num_wallets = 3
+sleep_wallets = 1200
+
 ref = '3UwGF8YNHXCK'
 
 max_concurrent_wallets = 1
