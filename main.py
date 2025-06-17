@@ -523,7 +523,7 @@ async def run_referral():
             else:
                 failed_count += 1
         else:
-            logger.warning(f"Wallet {account.address[:6)}...{account.address[-4:]} already processed, skipping.")
+            logger.warning(f"Wallet {account.address[:6]}...{account.address[-4:]} already processed, skipping.")
             continue
 
         # Increased random delay between accounts (5-30 seconds)
