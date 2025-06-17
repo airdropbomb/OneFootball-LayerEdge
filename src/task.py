@@ -1,15 +1,27 @@
-# task.py
 from typing import Optional
 
-from src.data import query_deil, query_verify_deil, query_quiz, query_quiz_verify, COMMON_HEADERS, json_data_qz_1, \
-    json_data_qz_2, json_data_qz1, json_data_qz2, json_data_3, json_data_qz4, json_data_4, json_data_qz3
+from src.data import (
+    query_deil,
+    query_verify_deil,
+    query_quiz,
+    query_quiz_verify,
+    COMMON_HEADERS,
+    json_data_qz_1,
+    json_data_qz_2,
+    json_data_qz1,
+    json_data_qz2,
+    json_data_3,
+    json_data_qz4,
+    json_data_4,
+    json_data_qz3,
+)
 from src.utils import _make_request
 from curl_cffi.requests import AsyncSession
 from loguru import logger
 
 
 async def campaign_activities_panel_deil(session: AsyncSession, proxy: Optional[str], token: str) -> None:
-    """Получает данные для панели активностей кампании (дейлик)."""
+    """Retrieves data for the campaign activities panel (daily tasks)."""
     headers = {
         **COMMON_HEADERS,
         'authorization': f'Bearer {token}',
@@ -35,13 +47,19 @@ async def campaign_activities_panel_deil(session: AsyncSession, proxy: Optional[
     )
 
 
-async def verify_activity_deil(session: AsyncSession, proxy: Optional[str], token: str, token_id: str, activityId = 'c326c0bb-0f42-4ab7-8c5e-4a648259b807') -> str:
+async def verify_activity_deil(
+    session: AsyncSession,
+    proxy: Optional[str],
+    token: str,
+    token_id: str,
+    activityId='c326c0bb-0f42-4ab7-8c5e-4a648259b807'
+) -> str:
     """
-    Верифицирует активность (дейлик).
-    Возвращает статус выполнения:
-    - 'COMPLETED' - дейлик выполнен успешно.
-    - 'ALREADY_COMPLETED' - дейлик уже был выполнен ранее.
-    - 'ERROR' - ошибка в запросе или неизвестный статус.
+    Verifies a daily activity.
+    Returns the completion status:
+    - 'COMPLETED' - Daily task completed successfully.
+    - 'ALREADY_COMPLETED' - Daily task was already completed previously.
+    - 'ERROR' - Error in the request or unknown status.
     """
     headers = {
         **COMMON_HEADERS,
@@ -69,7 +87,7 @@ async def verify_activity_deil(session: AsyncSession, proxy: Optional[str], toke
         operation_name='verify_activity_deil'
     )
 
-    # Проверка ответа
+    # Check the response
     if isinstance(response_data, dict):
         if 'errors' in response_data and response_data['errors']:
             return 'ALREADY_COMPLETED'
@@ -79,24 +97,25 @@ async def verify_activity_deil(session: AsyncSession, proxy: Optional[str], toke
             if status == 'COMPLETED':
                 return 'COMPLETED'
 
-    logger.error("Не удалось проверить статус, неизвестный ответ API.")
+    logger.error("Failed to verify status, unknown API response.")
     return 'ERROR'
 
 
-
-async def activity_quiz_detail(session: AsyncSession, proxy: Optional[str], token: str, num = None) -> None:
-    """Получает детали квиза."""
+async def activity_quiz_detail(session: AsyncSession, proxy: Optional[str], token: str, num=None) -> None:
+    """Retrieves quiz details."""
     headers = {
         **COMMON_HEADERS,
         'authorization': f'Bearer {token}',
         'x-apollo-operation-name': 'ActivityQuizDetail',
     }
-    if num == 2: json_data = json_data_qz2
-    if num == 3: json_data = json_data_qz3
-    if num == 4: json_data = json_data_qz4
-
-
-    else: json_data = json_data_qz1
+    if num == 2:
+        json_data = json_data_qz2
+    elif num == 3:
+        json_data = json_data_qz3
+    elif num == 4:
+        json_data = json_data_qz4
+    else:
+        json_data = json_data_qz1
 
     await _make_request(
         session,
@@ -108,13 +127,16 @@ async def activity_quiz_detail(session: AsyncSession, proxy: Optional[str], toke
     )
 
 
-async def verify_activity_quiz(session: AsyncSession, proxy: Optional[str], token: str, token_id: str, num = None) -> str:
-    """Верифицирует активность (квиз)."""
+async def verify_activity_quiz(
+    session: AsyncSession, proxy: Optional[str], token: str, token_id: str, num=None
+) -> str:
+    """Verifies a quiz activity."""
     if num == 2:
         json_data = json_data_qz_2
-    if num == 3: json_data = json_data_3
-    if num == 4: json_data = json_data_4
-
+    elif num == 3:
+        json_data = json_data_3
+    elif num == 4:
+        json_data = json_data_4
     else:
         json_data = json_data_qz_1
 
@@ -134,10 +156,10 @@ async def verify_activity_quiz(session: AsyncSession, proxy: Optional[str], toke
         operation_name='verify_activity_quiz'
     )
 
-    # Проверка ответа
+    # Check the response
     if isinstance(response_data, dict):
         if 'errors' in response_data and response_data['errors']:
-            logger.warning("API вернуло ошибку: квиз уже выполнен или другая ошибка.")
+            logger.warning("API returned an error: quiz already completed or other error.")
             return 'ALREADY_COMPLETED'
         if 'data' in response_data and 'verifyActivity' in response_data['data']:
             record = response_data['data']['verifyActivity'].get('record', {})
@@ -145,6 +167,6 @@ async def verify_activity_quiz(session: AsyncSession, proxy: Optional[str], toke
             if status == 'COMPLETED':
                 return 'COMPLETED'
 
-    # Если ничего не подошло, возвращаем ошибку
-    logger.error("Не удалось проверить статус квиза, неизвестный ответ API.")
+    # Return error if no valid response
+    logger.error("Failed to verify quiz status, unknown API response.")
     return 'ERROR'
