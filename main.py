@@ -536,7 +536,7 @@ async def run_referral():
 
 async def run_daily_only():
     """Runs only daily tasks with parallelism limits."""
-    if not async ACCOUNTS or not PRIVATE_KEYS:
+    if not ACCOUNTS or not PRIVATE_KEYS:
         logger.error("No private keys found for processing.")
         return
 
@@ -549,7 +549,7 @@ async def run_daily_only():
                 account,
                 private_key,
                 i,
-                full_guide=False
+                full_guide=False,
                 chek=False
             )
             for i, (account, private_key) in enumerate(zip(ACCOUNTS, PRIVATE_KEYS))
